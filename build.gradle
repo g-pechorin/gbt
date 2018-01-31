@@ -1,0 +1,30 @@
+
+buildscript {
+	apply from: '../pal-gradle/version.gradle'
+}
+
+allprojects {
+	apply from: rootProject.file('../pal-gradle/version.gradle')
+	apply from: rootProject.file('../pal-gradle/scala.gradle')
+}
+
+apply from: rootProject.file('../pal-gradle/antlr.gradle')
+
+description = "Peter LaValle's base-code for Gradle plugins"
+
+allprojects {
+	dependencies {
+		compileOnly gradleApi()
+		testCompile gradleApi()
+
+		if (project.rootProject != project) {
+			compile project.rootProject
+		}
+	}
+}
+
+project(':gbt-itest') {
+	dependencies {
+		compile "com.peterlavalle:junit_${pal.scalaFlavour}:${pal.peterVersion}"
+	}
+}
