@@ -22,9 +22,3 @@ allprojects {
 		}
 	}
 }
-
-project(':gbt-itest') {
-	dependencies {
-		compile "com.peterlavalle:junit_${pal.scalaFlavour}:${pal.peterVersion}"
-	}
-}
