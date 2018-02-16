@@ -1,4 +1,3 @@
-
 buildscript {
 	apply from: '../pal-gradle/version.gradle'
 }
@@ -14,6 +13,10 @@ description = "Peter LaValle's base-code for Gradle plugins"
 
 allprojects {
 	dependencies {
+
+		runtime group: 'org.codehaus.groovy', name: 'groovy-jsr223', version: '2.4.13'
+
+
 		compileOnly gradleApi()
 		testCompile gradleApi()
 

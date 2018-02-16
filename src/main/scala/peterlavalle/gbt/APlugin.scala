@@ -2,31 +2,69 @@ package peterlavalle.gbt
 
 import java.io.File
 import java.util.concurrent.Callable
+import javax.script.{ScriptEngine, ScriptEngineManager}
 
 import org.gradle.api._
 import org.gradle.api.file.SourceDirectorySet
 import org.gradle.api.internal.file.SourceDirectorySetFactory
 import org.gradle.api.plugins.{ExtensionContainer, JavaPluginConvention}
 import org.gradle.api.tasks.SourceSet
-import peterlavalle.{OverWriter, RunnableFuture}
+import peterlavalle.{LazyCache, OverWriter, RunnableFuture}
 
 import scala.beans.BeanProperty
 import scala.reflect.ClassTag
 
 object APlugin {
 
+	type SpawnSourceCode = (String, SourceDirectorySet) => APlugin.TSourceSet
+	val spawnCache: LazyCache[String, SpawnSourceCode] = {
+		val scriptEngine: ScriptEngine = new ScriptEngineManager().getEngineByName("groovy")
+		LazyCache[String, SpawnSourceCode] {
+			kind: String =>
+				scriptEngine.eval(
+					s"""
+						 |import org.gradle.api.file.SourceDirectorySet
+						 |import org.gradle.util.ConfigureUtil
+						 |import peterlavalle.gbt.APlugin
+						 |import scala.Function2
+						 |
+						 |new Function2<String, SourceDirectorySet, APlugin.TSourceSet>() {
+						 |	@Override
+						 |	APlugin.TSourceSet apply(String d, SourceDirectorySet s) {
+						 |		return new APlugin.TSourceSet() {
+						 |			final String displayName = d
+						 |
+						 |			String displayName() { return d; }
+						 |			final SourceDirectorySet src = s
+						 |
+						 |			SourceDirectorySet src() { return s; }
+						 |			final SourceDirectorySet $kind = s
+						 |
+						 |			SourceDirectorySet $kind() { return s; }
+						 |
+						 |			APlugin.TSourceSet $kind(Closure<?> configureClosure) {
+						 |				ConfigureUtil.configure(configureClosure, s);
+						 |				return this;
+						 |			}
+						 |		}
+						 |	}
+						 |}
+					""".stripMargin
+				).asInstanceOf[(String, SourceDirectorySet) => APlugin.TSourceSet]
+		}
+	}
+
 	def upName(name: String): String =
 		s"${name.substring(0, 1).toUpperCase()}${name.substring(1)}"
 
 	trait TSourceSet {
-
 		val displayName: String
 		val src: SourceDirectorySet
 
-		def Name: String = upName(name)
+		final def Name: String = upName(name)
 
 		@BeanProperty
-		def name: String = displayName
+		final def name: String = displayName
 	}
 
 }
@@ -34,7 +72,7 @@ object APlugin {
 /**
 	* base class for plugins. this (basically) exists to ease the creation of source sets
 	*/
-trait APlugin extends org.gradle.api.Plugin[Project] with TPackage {
+abstract class APlugin(sourceDirectorySetFactory: SourceDirectorySetFactory) extends org.gradle.api.Plugin[Project] with TPackage {
 
 	private val configureRunnables: RunnableFuture = new RunnableFuture()
 	private var target: Option[Project] = None
@@ -107,9 +145,29 @@ trait APlugin extends org.gradle.api.Plugin[Project] with TPackage {
 		this.target = None
 	}
 
-	def newSourceSet(kind: String, displayName: String, src: SourceDirectorySet): APlugin.TSourceSet
+	def sourceSet(name: String)(extensions: String*): Unit =
+		configure {
+			addSourceSet(name, sourceDirectorySetFactory, project) {
+				(sourceSet: SourceSet, theDirectorySet: SourceDirectorySet) =>
+					extensions.foreach {
+						extension: String =>
+							extension.head match {
+								case '.' =>
+									theDirectorySet.include(
+										s"**/*$extension"
+									)
 
-	final def addSourceSet
+								case '!' =>
+									theDirectorySet.include(extension.tail)
+
+								case _ =>
+									theDirectorySet.include(extension)
+							}
+					}
+			}
+		}
+
+	private final def addSourceSet
 	(
 		kind: String,
 		sourceDirectorySetFactory: SourceDirectorySetFactory,
@@ -123,7 +181,7 @@ trait APlugin extends org.gradle.api.Plugin[Project] with TPackage {
 
 					// setup a source set
 					val theSourceSet: APlugin.TSourceSet =
-						newSourceSet(kind, displayName, sourceDirectorySetFactory.create(displayName + s" $kind Source"))
+						spawnSourceSet(kind, displayName)
 
 					sourceSet.sourceSetConvention.getPlugins.put(kind, theSourceSet)
 
@@ -143,6 +201,9 @@ trait APlugin extends org.gradle.api.Plugin[Project] with TPackage {
 			}
 		)
 
+	private final def spawnSourceSet(kind: String, displayName: String): APlugin.TSourceSet =
+		APlugin.spawnCache(kind)(displayName, sourceDirectorySetFactory.create(displayName + s" $kind Source"))
+
 	final def install[T <: TProperTask](implicit classTag: ClassTag[T]): Unit =
 		configure {
 			project.install[T]
@@ -153,7 +214,7 @@ trait APlugin extends org.gradle.api.Plugin[Project] with TPackage {
 			project.getPluginManager.apply(classTag.runtimeClass)
 		}
 
-	def project: Project =
+	final def project: Project =
 		target match {
 			case Some(project: Project) =>
 				project

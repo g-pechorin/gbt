@@ -34,7 +34,7 @@ sealed abstract class TProperTask(group: String, description: String) extends De
 		val Some(configuration: Configuration) =
 			configurations.find((_: Configuration).getName == {
 				phase match {
-					// TODO ; should I worry about runtime/compileOPnly type deps?
+					// TODO ; should I worry about runtime/compileOnly type deps?
 					case Phase.Main =>
 						"compile"
 
@@ -119,7 +119,7 @@ sealed abstract class TProperTask(group: String, description: String) extends De
 	}
 
 	/**
-		* create a lambda that performs something during execution and (possibly) returns a value
+		* perform something during execution and (possibly) returns a value
 		*/
 	final def perform[T](lambda: => T): Later[T] = {
 
@@ -137,7 +137,7 @@ sealed abstract class TProperTask(group: String, description: String) extends De
 	}
 
 	/**
-		* create a lambda that does something as part of task setup
+		* do something durring setup
 		*/
 	final def connect(lambda: => Unit): Unit =
 		connectRunnables.add(
@@ -221,7 +221,7 @@ object TProperTask extends TPackage {
 		mine ++ (directDependencyProjects.flatMap(p => disectProject(p, Phase.Main, source)))
 	}
 
-	def sourceSet(project: Project, phase: Phase, source: String): SourceDirectorySet =
+	private def sourceSet(project: Project, phase: Phase, source: String): SourceDirectorySet =
 		project.gProperty[SourceDirectorySet](s"sourceSets.${phase.toString.toLowerCase}.$source")
 
 	private final def grabProjects(project: Project, test: Boolean = false): Stream[Project] = {
@@ -266,9 +266,6 @@ object TProperTask extends TPackage {
 		// we're ready!
 		setOnce.later
 	}
-
-	@deprecated("stop consuming source from other projects", "2017-10-19")
-	sealed trait Consumption
 
 	sealed trait Phase
 
@@ -497,71 +494,6 @@ object TProperTask extends TPackage {
 			// cool - return the later
 			setOnce.later
 		}
-
-		/**
-			* used during construction to denote that we will consume a sourceset
-			*/
-		@deprecated("stop consuming source from other projects", "2017-10-19")
-		final def consume(source: String, consumption: TProperTask.Consumption): Later[List[TProperTask.Source]] = {
-
-
-			val setOnce: Later.SetOnce[List[Source]] = new Later.SetOnce[List[TProperTask.Source]]()
-
-			this.ActionRunnables ! {
-				val sourceDirectorySets: Stream[SourceDirectorySet] =
-					consumption match {
-						case Consumption.Full =>
-
-
-							// okay; we can use the function now
-							disectProject(getProject, phase, source).distinct
-
-						case Consumption.Self =>
-							Stream(sourceSet(getProject, phase, source))
-					}
-
-				val fullStream: Stream[Stream[Source]] =
-					sourceDirectorySets.map {
-						sourceDirectorySet: SourceDirectorySet =>
-							// big, stupid, list of all possible files
-							val knownFiles: Set[String] =
-								sourceDirectorySet.getAsFileTree.map((_: File).AbsolutePath).toSet
-									.filterNot((_: String).matches(".*/[\\._].*"))
-
-							// now ... filter all contained files by the name ... an imperfect solution
-							sourceDirectorySet.getSrcDirs.toStream.flatMap {
-								root: File =>
-									(root **).filter {
-										path: String =>
-											knownFiles((root / path).AbsolutePath)
-									}.map(root -> (_: String))
-							}
-					}
-
-				setOnce :=
-					fullStream.flatten.distinctBy {
-						case (_, path: String) =>
-							path
-					}.toList
-			}
-
-			setOnce.later
-		}
-	}
-
-	@deprecated("stop consuming source from other projects", "2017-10-19")
-	object Consumption {
-
-		/**
-			* just stuff in our project
-			*/
-		case object Self extends Consumption
-
-		/**
-			* all in our project, and all in dependencies
-			*/
-		case object Full extends Consumption
-
 	}
 
 	object Phase {
@@ -574,6 +506,5 @@ object TProperTask extends TPackage {
 		case object Main extends Phase
 
 		case object Test extends Phase
-
 	}
 }
