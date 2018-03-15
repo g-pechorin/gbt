@@ -6,7 +6,7 @@ import org.gradle.api._
 import org.gradle.api.artifacts.{Configuration, ConfigurationContainer, Dependency, ProjectDependency}
 import org.gradle.api.file.SourceDirectorySet
 import org.gradle.api.tasks.TaskAction
-import peterlavalle.gbt.TProperTask.Phase
+import peterlavalle.gbt.TProperTask.{Phase, Source}
 import peterlavalle.{Later, RunnableFuture}
 
 import scala.reflect.ClassTag
@@ -20,11 +20,103 @@ import scala.util.matching.Regex
 	*/
 sealed abstract class TProperTask(group: String, description: String) extends DefaultTask with TPackage {
 
+	private val actionRunnables: RunnableFuture = new RunnableFuture()
+	private val connectRunnables: RunnableFuture = new RunnableFuture()
+
+	def dependsOn[T <: Task](implicit classTag: ClassTag[T]): Later[List[T]] = {
+
+		lazy val tasks: List[T] =
+			getProject.allTasksOf[T].toList
+
+		connect {
+			tasks.foreach {
+				t: T =>
+					dependsOn(t)
+			}
+		}
+
+		perform {
+			tasks
+		}
+	}
+
+	/**
+		* perform something during execution and (possibly) returns a value
+		*/
+	final def perform[T](lambda: => T): Later[T] = {
+
+		val setOnce: Later.SetOnce[T] =
+			new Later.SetOnce[T](s"have not performed $getPath (do you need to depend on it?)")
+
+		actionRunnables ! {
+			setOnce := lambda
+		}
+
+		setOnce.later
+	}
+
+	def produce[V](source: String)(lambda: File => V): Later[V]
+
+
 	setGroup(group)
 	setDescription(description)
 
-	private val actionRunnables: RunnableFuture = new RunnableFuture()
-	private val connectRunnables: RunnableFuture = new RunnableFuture()
+	def project: TProject = TProject.Gradle(getProject)
+
+	final def produce[V](source: String, phase: Phase)(lambda: File => V): Later[V] = {
+		val setOnce: Later.SetOnce[V] = new Later.SetOnce[V]()
+		// create an output folder
+		val genOut: File = {
+			val genOut: File = (getProject.getBuildDir / s"generated-src/$getName-$source").EnsureExists
+			getProject
+				.gProperty[SourceDirectorySet](s"sourceSets.${phase.toString.toLowerCase}.$source").srcDir(genOut)
+			genOut.EnsureExists
+		}
+
+		this.ActionRunnables ! {
+			setOnce := lambda(genOut)
+		}
+
+		setOnce.later
+	}
+
+	def dependencyOf(name: String): Unit = {
+		val suffix: String = s" `$name` for task ${getClass.getSimpleName.replaceAll("_Decorated$", "")}@`$getPath`"
+		connect {
+			val value: Task =
+				try {
+					getProject.getTasks.findByName(name)
+				} catch {
+					case e: Throwable =>
+						throw new GradleException(
+							"Error when trying to find" + suffix
+						)
+				}
+
+			requyre[GradleException](null != value, s"Could not findByName" + suffix)
+
+			try {
+				value.dependsOn(this)
+			} catch {
+				case e: Throwable =>
+					throw new GradleException(
+						s"Error when trying to depend on" + suffix
+					)
+			}
+		}
+	}
+
+	/**
+		* do something during setup
+		*/
+	final def connect(lambda: => Unit): Unit =
+		connectRunnables.add(
+			new Runnable {
+				override def run(): Unit = {
+					lambda
+				}
+			}
+		)
 
 	def depsImediate[T](phase: Phase)(lambda: List[Dependency] => T)(implicit classTag: ClassTag[T]): T = {
 
@@ -54,6 +146,7 @@ sealed abstract class TProperTask(group: String, description: String) extends De
 	def ext[E](implicit classTag: ClassTag[E]): E =
 		getProject.ext[E]
 
+	@deprecated
 	def sibling[T <: TProperTask](implicit classTag: ClassTag[T]): Later[T] =
 		TProperTask.dependConsumeTasks(this) {
 			this match {
@@ -72,6 +165,13 @@ sealed abstract class TProperTask(group: String, description: String) extends De
 		}.wrap {
 			case List(one) => one
 		}
+
+	final def findSingletonTask[T <: TProperTask.TTaskSingle](implicit classTag: ClassTag[T]): T = {
+		getProject.allTasksOf[T] match {
+			case Stream(found: T) =>
+				found
+		}
+	}
 
 	final def findPhasedTask[T <: TProperTask.TTaskPhased](phase: Phase)(implicit classTag: ClassTag[T]): T = {
 
@@ -118,38 +218,60 @@ sealed abstract class TProperTask(group: String, description: String) extends De
 		foundTask
 	}
 
+	@TaskAction
+	final def taskAction(): Unit = actionRunnables.run()
+
+
 	/**
-		* perform something during execution and (possibly) returns a value
+		* consumes source to produce some output
 		*/
-	final def perform[T](lambda: => T): Later[T] = {
+	final def consume[O](phase: Phase, source: String)(operation: Iterable[Source] => O)(implicit classTag: ClassTag[O]): Later[O] = {
 
-		val setOnce: Later.SetOnce[T] =
-			new Later.SetOnce[T]()
-				.withError {
-					s"have not performed $getPath (do you need to depend on it?)"
-				}
+		// create a set-once to hold out result
+		val setOnce: Later.SetOnce[O] = new Later.SetOnce[O]()
 
-		actionRunnables ! {
-			setOnce := lambda
+		// line up the actual action
+		this.ActionRunnables ! {
+
+			// get the compiled stuff, pass it along
+			phase match {
+				case Phase.Main | Phase.Test =>
+					val sourceDirectorySets: Stream[SourceDirectorySet] =
+						Stream(TProperTask.sourceSet(getProject, phase, source))
+
+					val fullStream: Stream[Stream[Source]] =
+						sourceDirectorySets.map {
+							sourceDirectorySet: SourceDirectorySet =>
+								// big, stupid, list of all possible files
+								val knownFiles: Set[String] =
+									sourceDirectorySet.getAsFileTree.map((_: File).AbsolutePath).toSet
+										.filterNot((_: String).matches(".*/[\\._].*"))
+
+								// now ... filter all contained files by the name ... an imperfect solution
+								sourceDirectorySet.getSrcDirs.toStream.flatMap {
+									root: File =>
+										(root **).filter {
+											path: String =>
+												knownFiles((root / path).AbsolutePath)
+										}.map(root -> (_: String))
+								}
+						}
+
+					setOnce :=
+						operation(
+							fullStream.flatten.distinctBy {
+								case (_, path: String) =>
+									path
+							}.toList
+						)
+			}
 		}
 
+		// cool - return the later
 		setOnce.later
 	}
 
-	/**
-		* do something durring setup
-		*/
-	final def connect(lambda: => Unit): Unit =
-		connectRunnables.add(
-			new Runnable {
-				override def run(): Unit = {
-					lambda
-				}
-			}
-		)
 
-	@TaskAction
-	final def taskAction(): Unit = actionRunnables.run()
 }
 
 /**
@@ -289,59 +411,58 @@ object TProperTask extends TPackage {
 			*/
 		def install[T <: TProperTask](implicit classTag: ClassTag[T]): Unit = {
 
-			def suffixName(implicit taskClass: Class[_ <: TProperTask]): String =
-				taskClass.getName.split("\\.").last.split("\\$").last match {
-					case decorated: String if decorated.endsWith("Task_Decorated") =>
-						decorated.dropRight("Task_Decorated".length)
-					case trueClass: String if trueClass.endsWith("Task") =>
-						trueClass.dropRight("Task".length)
-					case plain: String =>
-						plain
-				}
+			implicit val taskClass: Class[T] =
+				classTag.runtimeClass.asInstanceOf[Class[T]]
 
-			def prefixPackage(implicit taskClass: Class[_ <: TProperTask]): String =
-				taskClass.getName.split("\\.").reverse.tail.head
+			val (packageName: String, className: String) = {
 
-			implicit val taskClass: Class[T] = classTag.runtimeClass.asInstanceOf[Class[T]]
+				val rClassName: Regex =
+					"(\\w+\\.)+(([A-Z]\\w+\\$)*[A-Z]\\w+)" r
 
-			require(suffixName.head.isUpper)
-			prefixPackage.foreach((c: Char) => require(!c.isUpper, s"prefixPackage = `$prefixPackage`"))
+				val className: String =
+					taskClass.getName match {
+						case rClassName(_, className: String, _) =>
+							className.replace('$', '.')
+					}
 
-			val names: List[(String, String)] =
+				val packageName: String =
+					taskClass.getName.split("\\.").reverse.tail.head
+
+				(packageName, className)
+			}
+
+			val taskNames: List[(String, String)] =
 				if (classOf[TTaskSingle].isAssignableFrom(taskClass))
-					List((prefixPackage + suffixName, null))
+					List((packageName + className, null))
 				else
 					TProperTask.Phase.each {
 						(phase: Phase) =>
-							val taskName: String = prefixPackage + phase.toString + suffixName
-
-							if (Phase.Main == phase)
-								(taskName, null)
-							else
-								(taskName, prefixPackage + Phase.Main.toString + suffixName)
+							(packageName + phase + className, if (Phase.Main != phase) packageName + Phase.Main + className else null)
 					}
 
-			names.foreach {
-				case (taskName: String, usesName) =>
-					val task: T =
-						project.getTasks.create(taskName, taskClass, TProperTask.configurationAction[T])
+			// create the tasks
+			val taskObjects: Map[String, T] =
+				taskNames
+					.map {
+						case (taskName: String, _) =>
+							(taskName, project.getTasks.create(taskName, taskClass, TProperTask.configurationAction[T]))
+					}
+					.toMap
 
-					task.actionRunnables.lock
-
-					require(
-						taskName == task.getName
-					)
-
-					if (null != usesName)
-						task.dependsOn(
-							project.getTasks.findByName(usesName)
-						)
-			}
+			// connect the tasks
+			taskNames
+				.foreach {
+					case (_: String, null) =>
+					case (name: String, uses: String) =>
+						taskObjects(name) dependsOn taskObjects(uses)
+				}
 		}
-
 	}
 
 	abstract class TTaskSingle(group: String, description: String) extends TProperTask(group: String, description: String) {
+		override final def produce[V](source: String)(lambda: File => V): Later[V] =
+			produce[V](source, Phase.Main)(lambda)
+
 		/**
 			* consume all tasks in us or our children
 			*/
@@ -358,6 +479,7 @@ object TProperTask extends TPackage {
 				getProject.getTasks.filterTo[T]
 			}
 		}
+
 	}
 
 	abstract class TTaskPhased(group: String, description: String) extends TProperTask(group: String, description: String) {
@@ -371,6 +493,9 @@ object TProperTask extends TPackage {
 						case "Test" => Phase.Test
 					}
 			}
+
+		override final def produce[V](source: String)(lambda: File => V): Later[V] =
+			produce[V](source, phase)(lambda)
 
 		def depsImediate[T](lambda: List[Dependency] => T)(implicit classTag: ClassTag[T]): T = {
 			depsImediate(phase)(lambda)
@@ -432,68 +557,11 @@ object TProperTask extends TPackage {
 		final def findPhasedTask[T <: TProperTask.TTaskPhased](implicit classTag: ClassTag[T]): T =
 			findPhasedTask[T](this.phase)
 
-		final def produce[V](source: String)(lambda: File => V): Later[V] = {
-			val setOnce: Later.SetOnce[V] = new Later.SetOnce[V]()
-			// create an output folder
-			val genOut: File = {
-				val genOut: File = (getProject.getBuildDir / s"generated-src/$getName-$source").EnsureExists
-				getProject
-					.gProperty[SourceDirectorySet](s"sourceSets.${phase.toString.toLowerCase}.$source").srcDir(genOut)
-				genOut.EnsureExists
-			}
-
-			this.ActionRunnables ! {
-				setOnce := lambda(genOut)
-			}
-
-			setOnce.later
-		}
-
-		final def consume[O](source: String)(operation: Iterable[Source] => O)(implicit classTag: ClassTag[O]): Later[O] = {
-
-			// create a set-once to hold out result
-			val setOnce: Later.SetOnce[O] = new Later.SetOnce[O]()
-
-			// line up the actual action
-			this.ActionRunnables ! {
-
-				// get the compiled stuff, pass it along
-				phase match {
-					case Phase.Main | Phase.Test =>
-						val sourceDirectorySets: Stream[SourceDirectorySet] =
-							Stream(sourceSet(getProject, phase, source))
-
-						val fullStream: Stream[Stream[Source]] =
-							sourceDirectorySets.map {
-								sourceDirectorySet: SourceDirectorySet =>
-									// big, stupid, list of all possible files
-									val knownFiles: Set[String] =
-										sourceDirectorySet.getAsFileTree.map((_: File).AbsolutePath).toSet
-											.filterNot((_: String).matches(".*/[\\._].*"))
-
-									// now ... filter all contained files by the name ... an imperfect solution
-									sourceDirectorySet.getSrcDirs.toStream.flatMap {
-										root: File =>
-											(root **).filter {
-												path: String =>
-													knownFiles((root / path).AbsolutePath)
-											}.map(root -> (_: String))
-									}
-							}
-
-						setOnce :=
-							operation(
-								fullStream.flatten.distinctBy {
-									case (_, path: String) =>
-										path
-								}.toList
-							)
-				}
-			}
-
-			// cool - return the later
-			setOnce.later
-		}
+		/**
+			* consumes source to produce some output
+			*/
+		final def consume[O](source: String)(operation: Iterable[Source] => O)(implicit classTag: ClassTag[O]): Later[O] =
+			consume(phase, source)(operation)
 	}
 
 	object Phase {
@@ -506,5 +574,7 @@ object TProperTask extends TPackage {
 		case object Main extends Phase
 
 		case object Test extends Phase
+
 	}
+
 }

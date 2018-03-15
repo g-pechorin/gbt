@@ -167,6 +167,21 @@ abstract class APlugin(sourceDirectorySetFactory: SourceDirectorySetFactory) ext
 			}
 		}
 
+	final def project: Project =
+		target match {
+			case Some(project: Project) =>
+				project
+		}
+
+	final def configure(lambda: => Unit): Unit =
+		configureRunnables.add(
+			new Runnable {
+				override def run(): Unit = {
+					lambda
+				}
+			}
+		)
+
 	private final def addSourceSet
 	(
 		kind: String,
@@ -204,6 +219,7 @@ abstract class APlugin(sourceDirectorySetFactory: SourceDirectorySetFactory) ext
 	private final def spawnSourceSet(kind: String, displayName: String): APlugin.TSourceSet =
 		APlugin.spawnCache(kind)(displayName, sourceDirectorySetFactory.create(displayName + s" $kind Source"))
 
+
 	final def install[T <: TProperTask](implicit classTag: ClassTag[T]): Unit =
 		configure {
 			project.install[T]
@@ -213,20 +229,5 @@ abstract class APlugin(sourceDirectorySetFactory: SourceDirectorySetFactory) ext
 		configure {
 			project.getPluginManager.apply(classTag.runtimeClass)
 		}
-
-	final def project: Project =
-		target match {
-			case Some(project: Project) =>
-				project
-		}
-
-	final def configure(lambda: => Unit): Unit =
-		configureRunnables.add(
-			new Runnable {
-				override def run(): Unit = {
-					lambda
-				}
-			}
-		)
 
 }
