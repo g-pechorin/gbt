@@ -1,15 +1,12 @@
 package peterlavalle.gbt
 
-import java.io.File
-import java.util.concurrent.Callable
 import javax.script.{ScriptEngine, ScriptEngineManager}
 
 import org.gradle.api._
 import org.gradle.api.file.SourceDirectorySet
 import org.gradle.api.internal.file.SourceDirectorySetFactory
-import org.gradle.api.plugins.{ExtensionContainer, JavaPluginConvention}
-import org.gradle.api.tasks.SourceSet
-import peterlavalle.{LazyCache, OverWriter, RunnableFuture}
+import org.gradle.api.plugins.ExtensionContainer
+import peterlavalle.{LazyCache, RunnableFuture}
 
 import scala.beans.BeanProperty
 import scala.reflect.ClassTag
@@ -72,26 +69,25 @@ object APlugin {
 /**
 	* base class for plugins. this (basically) exists to ease the creation of source sets
 	*/
-abstract class APlugin(sourceDirectorySetFactory: SourceDirectorySetFactory) extends org.gradle.api.Plugin[Project] with TPackage {
+abstract class APlugin(val sourceDirectorySetFactory: SourceDirectorySetFactory)
+	extends org.gradle.api.Plugin[Project]
+		with TPackage
+		with MSources.MPlugin {
 
 	private val configureRunnables: RunnableFuture = new RunnableFuture()
 	private var target: Option[Project] = None
 
 	final override def apply(target: Project): Unit = {
 
-		new OverWriter(target.getRootProject.getBuildDir / "gbt.version")
-			.appund(target.getVersion.toString)
-			.closeFile
-
 		//
 		// check that we're not doing anything trickey
-		val extName = getClass.getPackage.getName.split("\\.").last
+		val extName: String = getClass.getPackage.getName.split("\\.").last
 		requyre[GradleException](
 			extName != target.getName,
 			s"Can't name the project $extName"
 		)
 		target.getTasks.foreach {
-			task =>
+			task: Task =>
 				requyre[GradleException](
 					extName != task.getName,
 					s"Can't name a task $extName"
@@ -145,26 +141,9 @@ abstract class APlugin(sourceDirectorySetFactory: SourceDirectorySetFactory) ext
 		this.target = None
 	}
 
-	def sourceSet(name: String)(extensions: String*): Unit =
+	final def install[T <: TProperTask](implicit classTag: ClassTag[T]): Unit =
 		configure {
-			addSourceSet(name, sourceDirectorySetFactory, project) {
-				(sourceSet: SourceSet, theDirectorySet: SourceDirectorySet) =>
-					extensions.foreach {
-						extension: String =>
-							extension.head match {
-								case '.' =>
-									theDirectorySet.include(
-										s"**/*$extension"
-									)
-
-								case '!' =>
-									theDirectorySet.include(extension.tail)
-
-								case _ =>
-									theDirectorySet.include(extension)
-							}
-					}
-			}
+			TProject.Gradle(project).install[T]
 		}
 
 	final def project: Project =
@@ -174,60 +153,10 @@ abstract class APlugin(sourceDirectorySetFactory: SourceDirectorySetFactory) ext
 		}
 
 	final def configure(lambda: => Unit): Unit =
-		configureRunnables.add(
-			new Runnable {
-				override def run(): Unit = {
-					lambda
-				}
-			}
-		)
-
-	private final def addSourceSet
-	(
-		kind: String,
-		sourceDirectorySetFactory: SourceDirectorySetFactory,
-		project: Project
-	)(detail: (SourceSet, SourceDirectorySet) => Unit): Unit =
-		project.getConvention.getPlugin(classOf[JavaPluginConvention]).getSourceSets.all(
-			new Action[SourceSet]() {
-				override def execute(sourceSet: SourceSet): Unit = {
-
-					val displayName: String = sourceSet.displayName
-
-					// setup a source set
-					val theSourceSet: APlugin.TSourceSet =
-						spawnSourceSet(kind, displayName)
-
-					sourceSet.sourceSetConvention.getPlugins.put(kind, theSourceSet)
-
-					// also ; setup a source set
-					val theDirectorySet: SourceDirectorySet = theSourceSet.src
-					theDirectorySet.srcDir(
-						new Callable[File]() {
-							@throws[Exception]
-							override def call: File = project.file(s"src/$displayName/$kind/")
-						}
-					)
-					sourceSet.getAllSource.source(theDirectorySet)
-
-					// do the detail!
-					detail(sourceSet, theDirectorySet)
-				}
-			}
-		)
-
-	private final def spawnSourceSet(kind: String, displayName: String): APlugin.TSourceSet =
-		APlugin.spawnCache(kind)(displayName, sourceDirectorySetFactory.create(displayName + s" $kind Source"))
-
-
-	final def install[T <: TProperTask](implicit classTag: ClassTag[T]): Unit =
-		configure {
-			project.install[T]
-		}
+		configureRunnables.add(() => lambda)
 
 	final def plugin[P <: Object](implicit classTag: ClassTag[P]): Unit =
 		configure {
 			project.getPluginManager.apply(classTag.runtimeClass)
 		}
-
 }

@@ -3,12 +3,14 @@ package peterlavalle.gbt
 import java.io.File
 import java.util
 
-import org.gradle.api.Task
+import org.gradle.api.Project
 import org.gradle.api.artifacts.Configuration
 import peterlavalle.{Later, PHile}
 
+import scala.reflect.ClassTag
 
-object Content
+
+object MContent
 	extends peterlavalle.TPackage
 		with TDiagnostics
 		with Later.T
@@ -16,10 +18,52 @@ object Content
 
 	private val contentPath: String = "META-INF/content"
 
+	/**
+		* used for plugins that will declare content types
+		*/
+	trait MPlugin {
+		this: APlugin =>
+
+		/**
+			* declares a content type
+			*
+			* @param classifier
+			* @param description
+			*/
+		def content(classifier: String, description: String): Unit =
+			MContent.Internal.contentDeclare(project, classifier, description)
+	}
+
+	/**
+		* used for tasks that will consume or produce content
+		*/
+	trait MTask {
+		/**
+			* consume+produce; do this from a task to;
+			* - declare that there's a sort of content
+			* - declare that we're going to expect a PHile aggregating the dependency content
+			* - we may/may not produce new files of content into the passed File object
+			* - whatever happens, we'll return a Later instance
+			*/
+		def content[O](classifier: String)(lambda: (PHile, File) => O)(implicit classTag: ClassTag[O]): Later[O] = {
+			???
+		}
+
+		/**
+			* consume only; do this from a task to;
+			* - declare that we're going to expect a PHile aggregating the content, from our dependencies and peer modules
+			* - whatever happens, we'll return a Later instance
+			*/
+		def contents[O](classifier: String)(lambda: PHile => O)(implicit classTag: ClassTag[O]): Later[O] = {
+			???
+		}
+	}
+
 	sealed class Task extends TProperTask.TTaskSingle(
 		"other",
 		"places content files onto the classpath, allowing them to be archived"
 	) {
+		// TODO; this should be phased
 
 		dependencyOf("processResources")
 
@@ -124,91 +168,29 @@ object Content
 		}
 	}
 
-}
-
-trait Content
-	extends peterlavalle.TPackage
-		with TDiagnostics
-		with peterlavalle.gbt.TPackage {
-
-	/**
-		* consume+produce; do this from a task to;
-		* - declare that there's a sort of content
-		* - declare that we're going to expect a PHile aggregating the content, from our dependencies
-		* - we may/may not produce new files of content into the passed File object
-		* - whatever happens, we'll return a Later instance
-		*/
-	def content[O](classifier: String, description: String)(lambda: (PHile, File) => O): Later[O] = {
-
-		// declare the content, and, heave it depend upon us
-		Internal.contentDeclare(classifier, description)
-			.dependsOn(this)
-
-		// setup a consume from dependencies
-		val dependencies: Later[PHile] = Internal.contentConsume(classifier)
-
-		// get a folder to use as a source for content
-		val output: File = Internal.contentProduce(classifier)
-
-		// do our thing!
-		task.perform {
-			lambda(dependencies.get, output)
-		}
-	}
-
-	private def task: TProperTask = this.asInstanceOf[TProperTask]
-
-	/**
-		* consume only; do this from a task to;
-		* - declare that there's a sort of content
-		* - declare that we're going to expect a PHile aggregating the content, from our dependencies and peer modules
-		* - whatever happens, we'll return a Later instance
-		*/
-	def contents[O](classifier: String, description: String)(lambda: PHile => O): Later[O] = {
-
-		// declare that we will depend on the content
-		task.dependsOn(
-			Internal.contentDeclare(classifier, description)
-		)
-
-		// setup a consume from dependencies
-		val dependencies: Later[PHile] = Internal.contentConsume(classifier)
-
-		// pickup whatever whatnots we should from the content task
-		val outputs: Later[File] =
-			Internal.contentReadout(classifier)
-
-		// do our thing!
-		task.perform {
-			lambda(
-				PHile.ofFolder(outputs.get) link dependencies.get
-			)
-		}
-	}
-
 	private object Internal extends Later.T {
 
-		def contentConsume(classifier: String): Later[PHile] = {
+		def contentConsume(task: TProperTask, classifier: String): Later[PHile] = {
 
-			val List(contentTask: Content.Task) =
-				task.getProject.findTasks[Content.Task]
+			val List(contentTask: MContent.Task) =
+				task.project.findTasks[MContent.Task]
 
 			task.perform {
 				contentTask(classifier).dependencies
 			}
 		}
 
-		def contentDeclare(classifier: String, description: String): Task = {
+		def contentDeclare(project: Project, classifier: String, description: String): Task = {
 
-			println(s"contentDeclare($classifier)")
+			// TODO; add some special handling if the user asks for .class content
 
-			val contentTask: Content.Task = findContentTask
+			val contentTask: MContent.Task = findContentTask(project)
 
 			if (contentTask ? classifier) {
 				require(description == contentTask(classifier).configuration.getDescription)
 			} else {
 				contentTask(classifier) =
-					task.getProject
+					project
 						.getConfigurations
 						.create(classifier)
 						.setDescription(description)
@@ -222,28 +204,93 @@ trait Content
 		/**
 			* creates a folder that can have content files placed into it, the content task will copy them
 			*/
-		def contentProduce(classifier: String): File =
-			findContentTask(classifier) / task.getName
+		def contentProduce(task: TProperTask, classifier: String): File =
+			findContentTask(task.getProject)(classifier) / task.getName
 
-		def contentReadout(classifier: String): Later[File] = {
+		def contentReadout(task: TProperTask, classifier: String): Later[File] = {
 
-			val List(contentTask: Content.Task) =
-				task.getProject.findTasks[Content.Task]
+			val List(contentTask: MContent.Task) =
+				task.project.findTasks[MContent.Task]
 
 			task.perform {
 				contentTask.contentOutput
 			}
 		}
 
-		private def findContentTask: Content.Task =
-			task.getProject.getTasks.filterTo[Content.Task] match {
+		private def findContentTask(project: Project): MContent.Task =
+			project.getTasks.filterTo[MContent.Task] match {
 				case Nil =>
-					task.getProject.install[Content.Task]
-					findContentTask
+					println("TODO; separate task for each content type")
+					project.install[MContent.Task]
+					findContentTask(project)
 
-				case List(contentTask: Content.Task) =>
+				case List(contentTask: MContent.Task) =>
 					contentTask
 			}
 	}
+
+}
+
+trait MContent
+	extends peterlavalle.TPackage
+		with TDiagnostics
+		with peterlavalle.gbt.TPackage {
+
+
+	/**
+		* consume+produce; do this from a task to;
+		* - declare that there's a sort of content
+		* - declare that we're going to expect a PHile aggregating the content, from our dependencies
+		* - we may/may not produce new files of content into the passed File object
+		* - whatever happens, we'll return a Later instance
+		*/
+	def content[O](classifier: String, description: String)(lambda: (PHile, File) => O): Later[O] = {
+
+		// declare the content, and, heave it depend upon us
+		MContent.Internal.contentDeclare(task.getProject, classifier, description)
+			.dependsOn(this)
+
+		// setup a consume from dependencies
+		val dependencies: Later[PHile] = MContent.Internal.contentConsume(task, classifier)
+
+		// get a folder to use as a source for content
+		val output: File = MContent.Internal.contentProduce(task, classifier)
+
+		// do our thing!
+		task.perform {
+			lambda(dependencies.get, output)
+		}
+	}
+
+	/**
+		* consume only; do this from a task to;
+		* - declare that there's a sort of content
+		* - declare that we're going to expect a PHile aggregating the content, from our dependencies and peer modules
+		* - whatever happens, we'll return a Later instance
+		*/
+	def contents[O](classifier: String, description: String)(lambda: PHile => O): Later[O] = {
+
+		// declare that we will depend on the content
+		task.dependsOn(
+			MContent.Internal.contentDeclare(task.getProject, classifier, description)
+		)
+
+		// setup a consume from dependencies
+		val dependencies: Later[PHile] = MContent.Internal.contentConsume(task, classifier)
+
+		// pickup whatever whatnots we should from the content task
+		val outputs: Later[File] =
+			MContent.Internal.contentReadout(task, classifier)
+
+		// do our thing!
+		task.perform {
+			lambda(
+				PHile.ofFolder(outputs.get) link dependencies.get
+			)
+		}
+	}
+
+	private def task: TProperTask = this.asInstanceOf[TProperTask]
+
 
 }
